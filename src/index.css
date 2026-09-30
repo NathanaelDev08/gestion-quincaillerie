@@ -1,0 +1,31 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body { @apply bg-slate-100 text-slate-900; }
+
+/* Masque les barres de défilement tout en gardant le défilement */
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+/* Barres fines et discrètes ailleurs */
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+*::-webkit-scrollbar-track { background: transparent; }
+
+@keyframes fetchslide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(400%); }
+}
+
+/* Focus clavier visible (accessibilité) */
+*:focus-visible { outline: 2px solid #1d4ed8; outline-offset: 1px; }
+
+@media print {
+  aside, header { display: none !important; }
+  main { padding: 0 !important; }
+  button { display: none !important; }
+  body * { visibility: hidden; }
+  #print-area, #print-area * { visibility: visible; }
+  #print-area { position: absolute; inset: 0; }
+}

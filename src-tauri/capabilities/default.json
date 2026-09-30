@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "identifier": "default",
+  "description": "Capabilities for GestionCommerciale",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "sql:allow-load",
+    "sql:allow-execute",
+    "sql:allow-select",
+    "store:allow-get",
+    "store:allow-set",
+    "store:allow-save",
+    "store:allow-load",
+    "fs:allow-read-file",
+    "fs:allow-write-file",
+    "fs:allow-copy-file",
+    "fs:allow-mkdir",
+    "fs:scope-appdata-recursive",
+    "fs:scope-document-recursive",
+    "dialog:allow-open",
+    "dialog:allow-save",
+    "shell:allow-open",
+    "notification:allow-notify",
+    "os:allow-os-type",
+    "process:allow-restart",
+    "clipboard-manager:allow-write-text",
+    "http:default"
+  ]
+}
