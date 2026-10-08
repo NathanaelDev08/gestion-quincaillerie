@@ -26,3 +26,8 @@ export interface NotificationItem { categorie: string; titre: string; detail: st
 export interface FactureFournisseur { id: string; numero: string; fournisseur_id: string; date_emission: string; date_echeance: string; statut: string; total_ht: number; total_tva: number; total_ttc: number; montant_paye: number; notes?: string; fournisseur_nom?: string; }
 export interface ReglementFournisseur { id: string; facture_id: string; montant: number; mode: string; date_reglement: string; reference?: string; }
 export interface Promo { id: string; code: string; type: string; valeur: number; date_debut: string; date_fin: string; actif: number; }
+export interface AuditRow { id: string; utilisateur: string; role: string; action: string; entite: string; entite_id: string; detail?: string; montant?: number; created_at: string; }
+export interface Depot { id: string; nom: string; adresse?: string; actif: number; }
+export interface Incident { id: number; horodatage: string; niveau: string; contexte: string; message: string; }
+export interface DepotStockRow { depot_id: string; depot_nom: string; produit_id: string; designation: string; reference: string; categorie?: string; quantite: number; unite?: string; }
+export interface TransfertInput { produit_id: string; depot_origine: string; depot_destination: string; quantite: number; }

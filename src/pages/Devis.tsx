@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { ArrowRight, Check, Copy, FileDown, List, Pencil, Plus, Printer, Trash2, Truck, X } from "lucide-react";
+import { ArrowRight, Check, Copy, FileDown, List, Pencil, Plus, Printer, Trash2, Truck, X, Zap } from "lucide-react";
 import { api } from "../services/api";
 import { Button, Input, Card, PageHeader, Badge, IconBtn, confirmDelete, DataView, Select, Pagination, Tabs, toast } from "../components/ui";
 import { DevisDoc, PrintModal } from "../components/PrintDoc";
@@ -40,6 +40,19 @@ export default function Devis() {
   };
   const toFacture = useMutation({ mutationFn: (id: string) => api.devisToFacture(id), onSuccess: () => { qc.invalidateQueries({ queryKey: ["devis"] }); qc.invalidateQueries({ queryKey: ["factures"] }); toast.success("Facture créée"); }, onError: (e: any) => toast.error(String(e)) });
   const toBl = useMutation({ mutationFn: (id: string) => api.blsFromDevis(id), onSuccess: () => { qc.invalidateQueries({ queryKey: ["devis"] }); qc.invalidateQueries({ queryKey: ["bls"] }); toast.success("Bon de livraison créé"); }, onError: (e: any) => toast.error(String(e)) });
+  const cycleComplet = useMutation({
+    mutationFn: async (id: string) => {
+      const bl = await api.blsFromDevis(id);
+      return api.blsToFacture(bl.id);
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["devis"] });
+      qc.invalidateQueries({ queryKey: ["bls"] });
+      qc.invalidateQueries({ queryKey: ["factures"] });
+      toast.success("Cycle complet : BL + facture créés");
+    },
+    onError: (e: any) => toast.error(String(e)),
+  });
   const del = useMutation({ mutationFn: (id: string) => api.devisDelete(id), onSuccess: () => qc.invalidateQueries({ queryKey: ["devis"] }) });
   const statut = useMutation({ mutationFn: ({ id, s }: { id: string; s: string }) => api.devisStatut(id, s), onSuccess: () => qc.invalidateQueries({ queryKey: ["devis"] }) });
   const dupliquer = useMutation({ mutationFn: (id: string) => api.devisDupliquer(id), onSuccess: () => qc.invalidateQueries({ queryKey: ["devis"] }) });
@@ -128,6 +141,7 @@ export default function Devis() {
             <IconBtn icon={Truck} title="Créer le bon de livraison" tone="green" onClick={() => toBl.mutate(d.id)} />
             <IconBtn icon={Printer} title="Imprimer le devis" tone="blue" onClick={() => imprimer(d.id)} />
             <IconBtn icon={ArrowRight} title="Convertir en facture" tone="blue" onClick={() => toFacture.mutate(d.id)} />
+            <IconBtn icon={Zap} title="Cycle complet : BL + facture en 1 clic" tone="green" onClick={() => { if (window.confirm(`Créer BL + facture depuis ${d.numero} ?`)) cycleComplet.mutate(d.id); }} />
             <IconBtn icon={Copy} title="Dupliquer" onClick={() => dupliquer.mutate(d.id)} />
             <IconBtn icon={FileDown} title="Générer le PDF" onClick={() => pdf(d.id)} />
             <IconBtn icon={Trash2} title="Supprimer" tone="red" onClick={() => { if (confirmDelete(d.numero)) del.mutate(d.id); }} />

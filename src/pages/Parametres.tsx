@@ -18,6 +18,15 @@ const DEVISES = [
 
 export default function Parametres() {
   const [msg, setMsg] = useState("");
+  // Période par défaut des exports : le mois en cours.
+  const aujourdhui = new Date();
+  const [expDebut, setExpDebut] = useState(
+    `${aujourdhui.getFullYear()}-${String(aujourdhui.getMonth() + 1).padStart(2, "0")}-01`,
+  );
+  const [expFin, setExpFin] = useState(
+    new Date().toISOString().slice(0, 10),
+  );
+  const [expMois, setExpMois] = useState(new Date().toISOString().slice(0, 7));
   const [tab, setTab] = useState<"societe" | "preferences" | "donnees" | "diagnostic">("societe");
   const [diag, setDiag] = useState<any | null>(null);
   const [company, setCompany] = useState<any>({ company_name: "", company_address: "", company_phone: "", company_email: "", company_siret: "", forme_juridique: "", capital: "", iban: "", conditions_paiement: "", logo: "" });
@@ -60,14 +69,57 @@ export default function Parametres() {
       setMsg("Préférences enregistrées — appliquées aux nouveaux documents");
     } catch (e: any) { setMsg(String(e)); }
   };
-  const doExport = async (entity: string) => {
-    const csv = await api.exportCsv(entity);
-    const blob = new Blob([csv], { type: "text/csv" });
+  const telecharger = (contenu: string, nom: string) => {
+    // BOM UTF-8 : sans lui, Excel affiche les accents en charabia.
+    const blob = new Blob(["﻿" + contenu], { type: "text/csv;charset=utf-8" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = `${entity}.csv`;
+    a.download = nom;
     a.click();
+    // Libère l'URL : sinon le fichier reste en mémoire.
+    URL.revokeObjectURL(a.href);
+  };
+
+  const doExport = async (entity: string) => {
+    const csv = await api.exportCsv(entity);
+    telecharger(csv, `${entity}.csv`);
     setMsg(`Export ${entity} OK`);
+  };
+
+  /** Export comptable : journal des ventes détaillé sur une période. */
+  const exportVentes = async (debut: string, fin: string) => {
+    setMsg("");
+    try {
+      const csv = await api.exportVentesCsv(debut, fin);
+      telecharger(csv, `ventes-${debut}_${fin}.csv`);
+      setMsg("Journal des ventes exporté");
+    } catch (e: any) { setMsg(String(e)); }
+  };
+
+  /** Synthèse TVA mensuelle : le format que réclame le comptable. */
+  const exportTva = async (mois: string) => {
+    setMsg("");
+    try {
+      const csv = await api.exportTvaCsv(mois);
+      telecharger(csv, `tva-${mois}.csv`);
+      setMsg(`Synthèse TVA ${mois} exportée`);
+    } catch (e: any) { setMsg(String(e)); }
+  };
+
+  const exportBalance = async () => {
+    setMsg("");
+    try {
+      telecharger(await api.exportBalanceCsv(), "balance.csv");
+      setMsg("Balance générale exportée");
+    } catch (e: any) { setMsg(String(e)); }
+  };
+
+  const exportJournal = async (debut: string, fin: string) => {
+    setMsg("");
+    try {
+      telecharger(await api.exportJournalCsv(debut, fin), `journal-${debut}_${fin}.csv`);
+      setMsg("Journal des écritures exporté");
+    } catch (e: any) { setMsg(String(e)); }
   };
   const doBackup = async () => {
     const p = await api.backup();
@@ -200,11 +252,30 @@ export default function Parametres() {
           <h3 className="font-semibold mb-2">Import CSV clients (nom,prenom,email,tel)</h3>
           <input type="file" accept=".csv" className="text-sm mb-4"
             onChange={(e) => doImport("clients", e.target.files?.[0])} />
+          <h3 className="font-semibold mb-1">Exports comptables</h3>
+          <p className="text-xs text-slate-500 mb-2">
+            Format CSV point-virgule, séparateur décimal virgule. Lisible par
+            Excel et les logiciels de gestion. Réservé à l'administrateur et au comptable.
+          </p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-2 max-w-2xl">
+            <Input type="date" value={expDebut} onChange={(e) => setExpDebut(e.target.value)} title="Du" />
+            <Input type="date" value={expFin} onChange={(e) => setExpFin(e.target.value)} title="Au" />
+          </div>
+          <div className="flex gap-2 flex-wrap mb-4">
+            <Button onClick={() => exportVentes(expDebut, expFin)}><Download size={15} /> Journal des ventes</Button>
+            <Button onClick={() => exportJournal(expDebut, expFin)}><Download size={15} /> Écritures</Button>
+            <Button onClick={exportBalance}><Download size={15} /> Balance</Button>
+            <Button onClick={() => exportTva(expMois)}><Download size={15} /> Synthèse TVA ({expMois})</Button>
+          </div>
           <h3 className="font-semibold mb-2">Sauvegarde</h3>
           <div className="flex gap-2 mb-4">
-            <Button onClick={doBackup}><DatabaseBackup size={15} /> Backup BDD</Button>
+            <Button onClick={doBackup}><DatabaseBackup size={15} /> Sauvegarder</Button>
             <Button className="bg-amber-600" onClick={doRestore}><RotateCcw size={15} /> Restaurer</Button>
           </div>
+          <p className="text-xs text-slate-500 mb-4">
+            Les sauvegardes sont chiffrées (AES-256) : la base contient des
+            coordonnées clients et les salaires du personnel.
+          </p>
           <h3 className="font-semibold mb-2">Données de démonstration</h3>
           <p className="text-xs text-slate-500 mb-2">8 clients, 4 fournisseurs, 12 produits, 4 devis, 5 factures, règlements, dépenses, écritures — contexte ivoirien en F CFA.</p>
           <div className="flex gap-2">

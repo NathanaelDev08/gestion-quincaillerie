@@ -1,4 +1,32 @@
+# Dépendances et builds
 node_modules/
 dist/
 src-tauri/target/
 src-tauri/gen/
+
+# Données de l'utilisateur — ne doivent JAMAIS être versionnées
+*.db
+*.db-wal
+*.db-shm
+*.db.enc
+ventes-hors-ligne.jsonl
+settings.json
+
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Sauvegardes et journaux produits par l'application
+backups/
+journal-*.txt
+*.log
+
+# Éditeurs / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp

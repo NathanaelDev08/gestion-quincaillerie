@@ -1,13 +1,13 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { BookOpen, Check, ListOrdered, Lock, PieChart, Plus, Scale } from "lucide-react";
+import { BookOpen, Check, ListOrdered, Lock, PieChart, Plus, Scale, Wallet } from "lucide-react";
 import { api } from "../services/api";
 import { Button, Input, Card, PageHeader, DataView, Pagination, paginate, Tabs, toast } from "../components/ui";
 import { fmtMoney, todayISO, JOURNAUX } from "../utils/format";
 
 export default function Comptabilite() {
   const qc = useQueryClient();
-  const [tab, setTab] = useState<"journal" | "balance" | "livre" | "exercices" | "ohada">("journal");
+  const [tab, setTab] = useState<"journal" | "balance" | "livre" | "exercices" | "ohada" | "treso">("journal");
   const [compte, setCompte] = useState("411000");
   const [ecr, setEcr] = useState({ journal_code: "OD", compte_numero: "", date_ecriture: todayISO(), libelle: "", debit: 0, credit: 0 });
   const [exo, setExo] = useState({ libelle: "", dateDebut: todayISO(), dateFin: todayISO() });
@@ -22,6 +22,9 @@ export default function Comptabilite() {
   const { data: bilan } = useQuery({ queryKey: ["ohada-bilan"], queryFn: api.ohadaBilan, enabled: tab === "ohada" });
   const { data: resultat } = useQuery({ queryKey: ["ohada-resultat"], queryFn: api.ohadaResultat, enabled: tab === "ohada" });
   const { data: tva } = useQuery({ queryKey: ["ohada-tva"], queryFn: api.ohadaTva, enabled: tab === "ohada" });
+  const { data: facturesTreso } = useQuery({ queryKey: ["factures-all"], queryFn: () => api.facturesList(1, 200), enabled: tab === "treso" });
+  const { data: dettesTreso } = useQuery({ queryKey: ["dettes"], queryFn: api.ffList, enabled: tab === "treso" });
+  const { data: cloturesTreso } = useQuery({ queryKey: ["clotures"], queryFn: api.cloturesList, enabled: tab === "treso" });
 
   const createEcr = useMutation({
     mutationFn: () => api.ecritureCreate({ ...ecr, piece_ref: "" }),
@@ -47,7 +50,7 @@ export default function Comptabilite() {
   return (
     <div>
       <PageHeader title="Comptabilité" subtitle="Journal, balance, grand livre, exercices" />
-      <Tabs<"journal" | "balance" | "livre" | "exercices" | "ohada">
+      <Tabs<"journal" | "balance" | "livre" | "exercices" | "ohada" | "treso">
         active={tab} onChange={setTab}
         tabs={[
           { key: "journal", label: "Journal & saisie", icon: ListOrdered },
@@ -55,6 +58,7 @@ export default function Comptabilite() {
           { key: "livre", label: "Grand livre", icon: BookOpen },
           { key: "ohada", label: "États OHADA", icon: PieChart },
           { key: "exercices", label: "Exercices", icon: Lock },
+          { key: "treso", label: "Trésorerie", icon: Wallet },
         ]}
       />
       {tab === "journal" && (
@@ -178,6 +182,34 @@ export default function Comptabilite() {
                 <div className="flex justify-between font-bold py-1"><span>TVA due</span><span>{fmtMoney(tva?.due || 0)}</span></div>
               </Card>
             </div>
+          </div>
+        )}
+        {tab === "treso" && (
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+            {(() => {
+              const creances = ((facturesTreso as any)?.data || []).reduce((s: number, f: any) => s + Math.max(0, (f.total_ttc || 0) - (f.montant_paye || 0)), 0);
+              const dettesTot = (dettesTreso || []).reduce((s: number, d: any) => s + Math.max(0, (d.total_ttc || 0) - (d.montant_paye || 0)), 0);
+              const caisseJour = (cloturesTreso || []).find((z: any) => z.date === todayISO())?.total || 0;
+              const net = creances - dettesTot;
+              return (<>
+                <Card>
+                  <h3 className="font-semibold mb-2">Trésorerie prévisionnelle</h3>
+                  <div className="flex justify-between text-sm py-1 border-b"><span>Créances clients (à encaisser)</span><b className="text-green-700">{fmtMoney(creances)}</b></div>
+                  <div className="flex justify-between text-sm py-1 border-b"><span>Dettes fournisseurs (à payer)</span><b className="text-red-600">{fmtMoney(dettesTot)}</b></div>
+                  <div className="flex justify-between font-bold py-1"><span>Net prévisionnel</span><span className={net >= 0 ? "text-green-700" : "text-red-600"}>{fmtMoney(net)}</span></div>
+                  <div className="flex justify-between text-sm py-1"><span>Caisse du jour (clôture)</span><b>{fmtMoney(caisseJour)}</b></div>
+                  <p className="text-xs mt-2 text-slate-500">{net < 0 ? "⚠ Les dettes dépassent les créances : priorise les relances clients avant de payer les fournisseurs." : "✓ Position saine : tu peux honorer les dettes avec les créances."}</p>
+                </Card>
+                <Card>
+                  <h3 className="font-semibold mb-2">Actions</h3>
+                  <div className="text-sm space-y-1.5">
+                    <div className="flex justify-between"><span>Relancer les impayés</span><a href="#/relances" className="font-bold text-red-600">Relances →</a></div>
+                    <div className="flex justify-between"><span>Payer un fournisseur</span><a href="#/achats" className="font-bold text-blue-700">Achats / Dettes →</a></div>
+                    <div className="flex justify-between"><span>Encaisser (caisse)</span><a href="#/caisse" className="font-bold text-green-700">Caisse →</a></div>
+                  </div>
+                </Card>
+              </>);
+            })()}
           </div>
         )}
     </div>

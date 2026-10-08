@@ -162,7 +162,7 @@ export function DataCards<T>({
   );
 }
 
-import { ChevronLeft, ChevronRight, LayoutGrid, List as ListIcon, Table2 } from "lucide-react";
+import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, LayoutGrid, List as ListIcon, Table2 } from "lucide-react";
 
 /** Mode d'affichage persistant (global à l'application) */
 export type ViewMode = "cards" | "list" | "table";
@@ -333,27 +333,58 @@ export function Pagination({ page, perPage, total, onChange }: {
   const p = Math.min(Math.max(1, page), pages);
   const from = total === 0 ? 0 : (p - 1) * perPage + 1;
   const to = Math.min(total, p * perPage);
+
+  // Sur de longues listes, proposer des sauts plutôt que de cliquer 40 fois.
+  const sauts: number[] = [];
+  if (pages > 7) {
+    sauts.push(1);
+    if (p > 3) sauts.push(p - 1);
+    if (p > 2 && p - 1 !== 1) sauts.push(p);
+    if (p < pages - 1) sauts.push(p + 1);
+    if (p < pages - 2 && p + 1 !== pages) sauts.push(pages);
+  }
+
   return (
-    <div className="flex items-center justify-between mt-2 text-sm text-slate-600">
+    <div className="flex items-center justify-between mt-2 text-sm text-slate-600 flex-wrap gap-2">
       <span>{from}–{to} sur {total} élément{total > 1 ? "s" : ""}</span>
       <div className="flex items-center gap-1">
         <select className="border rounded px-1 py-0.5 text-xs" value={perPage} title="Éléments par page"
           onChange={(e) => onChange(1, +e.target.value)}>
-          {[10, 20, 50, 100].map((n) => <option key={n} value={n}>{n} / page</option>)}
+          {[10, 20, 50, 100, 200].map((n) => <option key={n} value={n}>{n} / page</option>)}
         </select>
         <button className="p-1.5 rounded hover:bg-slate-100 disabled:opacity-40" disabled={p <= 1}
+          title="Première page" onClick={() => onChange(1, perPage)}><ChevronsLeft size={15} /></button>
+        <button className="p-1.5 rounded hover:bg-slate-100 disabled:opacity-40" disabled={p <= 1}
           title="Page précédente" onClick={() => onChange(p - 1, perPage)}><ChevronLeft size={15} /></button>
-        <span className="text-xs px-1">Page {p} / {pages}</span>
+        {pages > 7
+          ? sauts.map((n) => (
+              <button key={n}
+                className={`px-1.5 py-0.5 rounded text-xs ${n === p ? "bg-blue-600 text-white" : "hover:bg-slate-100"}`}
+                title={`Aller à la page ${n}`}
+                onClick={() => onChange(n, perPage)}>{n}</button>
+            ))
+          : <span className="text-xs px-1">Page {p} / {pages}</span>}
         <button className="p-1.5 rounded hover:bg-slate-100 disabled:opacity-40" disabled={p >= pages}
           title="Page suivante" onClick={() => onChange(p + 1, perPage)}><ChevronRight size={15} /></button>
+        <button className="p-1.5 rounded hover:bg-slate-100 disabled:opacity-40" disabled={p >= pages}
+          title="Dernière page" onClick={() => onChange(pages, perPage)}><ChevronsRight size={15} /></button>
       </div>
     </div>
   );
 }
 
-/** Découpe un tableau pour la pagination côté client */
+/**
+ * Découpe un tableau pour la pagination côté client.
+ *
+ * La page demandée est ramenée dans les bornes : après un filtre ou une
+ * suppression, la page courante peut dépasser le nombre de pages et
+ * l'utilisateur resterait sur une liste vide sans comprendre pourquoi.
+ */
 export function paginate<T>(rows: T[], page: number, perPage: number): T[] {
-  return rows.slice((page - 1) * perPage, page * perPage);
+  if (perPage <= 0) return [];
+  const pages = Math.max(1, Math.ceil(rows.length / perPage));
+  const p = Math.min(Math.max(1, page), pages);
+  return rows.slice((p - 1) * perPage, p * perPage);
 }
 
 /** Barre d'onglets d'une page (un onglet = une fonctionnalité) */

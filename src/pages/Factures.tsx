@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Check, Copy, Eye, EyeOff, FileDown, List, Plus, Printer, Trash2, Wallet, X } from "lucide-react";
+import { Check, Copy, Eye, EyeOff, FileDown, List, Plus, Printer, Trash2, Undo2, Wallet, X } from "lucide-react";
 import { api } from "../services/api";
 import { Button, Input, Card, PageHeader, Badge, IconBtn, confirmDelete, DataView, Pagination, Tabs, toast, paginate } from "../components/ui";
 import { FactureDoc, RecuDoc, PrintModal } from "../components/PrintDoc";
@@ -59,6 +59,29 @@ export default function Factures() {
   const del = useMutation({ mutationFn: (id: string) => api.facturesDelete(id), onSuccess: () => qc.invalidateQueries({ queryKey: ["factures"] }) });
   const statut = useMutation({ mutationFn: ({ id, s }: { id: string; s: string }) => api.facturesStatut(id, s), onSuccess: () => qc.invalidateQueries({ queryKey: ["factures"] }) });
   const dupliquer = useMutation({ mutationFn: (id: string) => api.facturesDupliquer(id), onSuccess: () => qc.invalidateQueries({ queryKey: ["factures"] }) });
+  const avoirExpress = useMutation({
+    mutationFn: async (f: any) => {
+      const [fac, lignes] = await api.facturesGet(f.id);
+      return api.avoirsCreate({
+        facture_id: f.id,
+        client_id: fac.client_id,
+        date_emission: todayISO(),
+        motif: `Retour total ${fac.numero}`,
+        lignes: (lignes || []).map((l: any) => ({
+          produit_id: l.produit_id, designation: l.designation, quantite: l.quantite,
+          prix_unitaire_ht: l.prix_unitaire_ht, taux_tva: l.taux_tva, remise: 0,
+        })),
+        retour_stock: true,
+      });
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["factures"] });
+      qc.invalidateQueries({ queryKey: ["avoirs"] });
+      qc.invalidateQueries({ queryKey: ["stock"] });
+      toast.success("Avoir total créé, stock réintégré");
+    },
+    onError: (e: any) => toast.error(String(e)),
+  });
 
   return (
     <div>
@@ -159,6 +182,7 @@ export default function Factures() {
               <IconBtn icon={detailId === f.id ? EyeOff : Eye} title="Voir le détail" tone="blue" onClick={() => setDetailId(detailId === f.id ? null : f.id)} />
               <IconBtn icon={FileDown} title="Générer le PDF" onClick={() => pdf(f.id)} />
               <IconBtn icon={Copy} title="Dupliquer" onClick={() => dupliquer.mutate(f.id)} />
+              <IconBtn icon={Undo2} title="Avoir total + retour stock en 1 clic" tone="green" onClick={() => { if (window.confirm(`Créer un avoir total pour ${f.numero} et réintégrer le stock ?`)) avoirExpress.mutate(f); }} />
               <IconBtn icon={Trash2} title="Supprimer" tone="red" onClick={() => { if (confirmDelete(f.numero)) del.mutate(f.id); }} />
             </>)}
           />

@@ -1,6 +1,6 @@
 [package]
 name = "gestion-quincaillerie"
-version = "0.1.0"
+version = "1.0.0"
 description = "Application de gestion de quincaillerie - stock, ventes comptoir, fournisseurs, factures"
 edition = "2021"
 
@@ -9,7 +9,6 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
-tauri-plugin-sql = { version = "2", features = [] }
 tauri-plugin-store = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-dialog = "2"
@@ -20,6 +19,7 @@ tauri-plugin-process = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-http = "2"
+aes-gcm = "0.10"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }

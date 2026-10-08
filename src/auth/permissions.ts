@@ -19,8 +19,11 @@ export const PAGE_ACCESS: Record<string, Role[]> = {
   "/depenses": ["admin", "comptable"],
   "/relances": ["admin", "commercial", "comptable"],
   "/stock": ["admin", "user", "commercial"],
+  "/depots": ["admin", "user", "commercial"],
   "/comptabilite": ["admin", "comptable"],
   "/utilisateurs": ["admin"],
+  "/audit": ["admin"],
+  "/incidents": ["admin", "comptable"],
   "/parametres": ["admin"],
 };
 

@@ -13,6 +13,8 @@ pub mod caisse;
 pub mod paie;
 pub mod notifications;
 pub mod pro;
+pub mod audit;
+pub mod exports;
 
 pub use auth::*;
 pub use tiers::*;
@@ -29,3 +31,5 @@ pub use caisse::*;
 pub use paie::*;
 pub use notifications::*;
 pub use pro::*;
+pub use audit::*;
+pub use exports::*;

@@ -1,6 +1,6 @@
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle, Banknote, BellRing, FileText, Percent, TrendingUp, Wallet, Warehouse } from "lucide-react";
+import { AlertTriangle, Banknote, BellRing, FileText, Percent, ShoppingBag, ShoppingCart, TrendingUp, Wallet, Warehouse } from "lucide-react";
 import { Bar, BarChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { api } from "../services/api";
 import { Card, PageHeader, DataView } from "../components/ui";
@@ -38,6 +38,8 @@ export default function Dashboard() {
   const { data: topC } = useQuery({ queryKey: ["topC"], queryFn: api.topClients, refetchInterval: 30000 });
   const { data: retard } = useQuery({ queryKey: ["retard"], queryFn: api.facturesRetard, refetchInterval: 30000 });
   const { data: dernieres } = useQuery({ queryKey: ["factures", 1, 5], queryFn: () => api.facturesList(1, 5) });
+  const { data: commandes } = useQuery({ queryKey: ["commandes"], queryFn: api.commandesList, refetchInterval: 30000 });
+  const { data: dettes } = useQuery({ queryKey: ["dettes"], queryFn: api.ffList, refetchInterval: 30000 });
   const actualise = new Date(dataUpdatedAt || Date.now()).toLocaleTimeString("fr-FR");
 
   const graphe = (ca || []).map((c) => {
@@ -46,10 +48,28 @@ export default function Dashboard() {
   });
 
   const nbRetard = retard?.length || 0;
+  const totalDettes = (dettes || []).reduce((s: number, d: any) => s + Math.max(0, (d.total_ttc || 0) - (d.montant_paye || 0)), 0);
+  const commandesEnCours = (commandes || []).filter((c: any) => ["brouillon", "validee", "partielle"].includes(c.statut)).length;
 
   return (
     <div>
-      <PageHeader title="Tableau de bord" subtitle={`Vue d'ensemble — montants en Franc CFA (XOF) • Actualisé à ${actualise}`} />
+      <PageHeader title="Tableau de bord" subtitle={`Votre quincaillerie en Franc CFA (XOF) • Actualisé à ${actualise}`} />
+
+      {/* Raccourcis vente / achat */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5 mb-3">
+        <Link to="/caisse" className="flex items-center gap-2 px-3 py-2.5 rounded-xl bg-green-600 text-white font-medium hover:bg-green-700">
+          <ShoppingBag size={16} /> Nouvelle vente (caisse)
+        </Link>
+        <Link to="/achats" className="flex items-center gap-2 px-3 py-2.5 rounded-xl bg-blue-700 text-white font-medium hover:bg-blue-800">
+          <ShoppingCart size={16} /> Nouvel achat (commande)
+        </Link>
+        <Link to="/factures" className="flex items-center gap-2 px-3 py-2.5 rounded-xl bg-white border font-medium text-slate-700 hover:bg-slate-50">
+          <FileText size={16} /> Factures clients
+        </Link>
+        <Link to="/achats" className="flex items-center gap-2 px-3 py-2.5 rounded-xl bg-white border font-medium text-slate-700 hover:bg-slate-50">
+          <Wallet size={16} /> Dettes : {fmtCompact(totalDettes)}
+        </Link>
+      </div>
 
       {nbRetard > 0 && (
         <Link to="/relances" className="flex items-center gap-2 mb-3 px-3 py-2 rounded-xl bg-amber-50 border border-amber-200 text-sm text-amber-800 hover:bg-amber-100">
@@ -65,6 +85,12 @@ export default function Dashboard() {
         <Kpi icon={AlertTriangle} tone="red" label="Impayés" value={fmtCompact(stats?.factures_impayees || 0)} sub={`${nbRetard} facture(s) en retard`} />
         <Kpi icon={Wallet} tone="amber" label="Clients / Produits" value={`${stats?.nb_clients || 0} / ${stats?.nb_produits || 0}`} sub={`${stats?.nb_devis_en_cours || 0} devis en cours`} />
         <Kpi icon={Warehouse} tone="slate" label="Stock valorisé" value={fmtCompact(stats?.stock_valeur || 0)} sub={`${stats?.alertes_stock || 0} alerte(s) seuil`} />
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-2.5 mb-3">
+        <Kpi icon={ShoppingCart} tone="blue" label="Commandes en cours" value={String(commandesEnCours)} sub={`${(commandes || []).length} bons au total`} />
+        <Kpi icon={Wallet} tone="amber" label="Dettes fournisseurs" value={fmtCompact(totalDettes)} sub={fmtMoney(totalDettes)} />
+        <Kpi icon={ShoppingBag} tone="green" label="Devis en cours" value={String(stats?.nb_devis_en_cours || 0)} sub="À transformer en facture" />
       </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">

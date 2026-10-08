@@ -1,0 +1,92 @@
+name: Vérifications
+
+# Aucun push direct sur main n'est accepté : le code passe par une revue.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  verifier:
+    name: Front + Rust
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Installer Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Installer Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      # Les dépendances Rust sont mises en cache : sans cela, chaque build
+      # retélécharge et recompile l'intégralité de l'arbre Tauri (~20 min).
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: ${{ runner.os }}-rust-${{ hashFiles('src-tauri/Cargo.lock') }}
+
+      - name: Installer les dépendances
+        run: npm ci
+
+      - name: Vérifier les types
+        run: npx tsc --noEmit
+
+      - name: Tests d'interface
+        run: npm run test
+
+      - name: Format Rust
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+
+      - name: Analyse statique Rust
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
+
+      - name: Tests Rust
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Build web
+        run: npm run build
+
+  installateur:
+    name: Installateur Windows
+    runs-on: windows-latest
+    needs: verifier
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: ${{ runner.os }}-rust-release-${{ hashFiles('src-tauri/Cargo.lock') }}
+
+      - run: npm ci
+
+      - name: Construire l'application
+        run: npx tauri build
+
+      - name: Publier l'installateur
+        uses: actions/upload-artifact@v4
+        with:
+          name: gestion-quincaillerie-installateur
+          path: |
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*.exe
+          retention-days: 30

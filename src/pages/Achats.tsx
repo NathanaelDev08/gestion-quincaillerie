@@ -66,7 +66,7 @@ export default function Achats() {
 
   return (
     <div>
-      <PageHeader title="Achats fournisseurs" subtitle="Bons de commande et réceptions — montants en F CFA" />
+      <PageHeader title="Achats quincaillerie" subtitle="Commande fournisseur → réception (stock +) → facture → règlement" />
       <Tabs<"commandes" | "nouvelle" | "dettes">
         active={tab} onChange={setTab}
         tabs={[

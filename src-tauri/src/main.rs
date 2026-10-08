@@ -8,46 +8,27 @@ mod db;
 mod error;
 mod models;
 mod services;
+mod validation;
+mod diagnostics;
+mod crypto;
+mod horsligne;
 
 use authz::LoginGuard;
-use db::DbPool;
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_sql::Builder::default().build())
-        .plugin(tauri_plugin_store::Builder::default().build())
-        .plugin(tauri_plugin_fs::init())
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_os::init())
-        .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_clipboard_manager::init())
-        .plugin(tauri_plugin_http::init())
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            let _ = app.get_webview_window("main").expect("no main window").set_focus();
-        }))
-        .manage(LoginGuard::default())
-        .setup(|app| {
-            let handle = app.handle().clone();
-            tauri::async_runtime::block_on(async move {
-                match db::init_db(&handle).await {
-                    Ok(pool) => {
-                        handle.manage(pool);
-                    }
-                    Err(e) => eprintln!("Erreur init DB: {}", e),
-                }
-            });
-            Ok(())
-        })
-        .invoke_handler(tauri::generate_handler![
-            commands::auth_login,
+    // Barrière d'autorisation : chaque appel IPC passe par ce contrôle
+    // avant d'atteindre la commande. Deny-by-default (voir authz.rs).
+    let handler: Box<dyn Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync> =
+        Box::new(tauri::generate_handler![
+        commands::auth_login,
             commands::auth_register,
             commands::auth_logout,
             commands::auth_get_current_user,
             commands::auth_refresh_token,
+            commands::auth_nb_utilisateurs,
+            commands::auth_revoquer_sessions,
             commands::clients_list,
             commands::clients_get,
             commands::clients_create,
@@ -66,6 +47,7 @@ pub fn run() {
             commands::produits_update,
             commands::produits_delete,
             commands::produits_search,
+            commands::produits_caisse,
             commands::produits_stock_mouvements,
             commands::produits_ajuster_stock,
             commands::devis_list,
@@ -132,6 +114,9 @@ pub fn run() {
             commands::users_list,
             commands::users_changer_role,
             commands::users_delete,
+            commands::users_changer_mot_de_passe,
+            commands::users_reinitialiser_mot_de_passe,
+            commands::users_mot_de_passe_par_defaut,
             commands::factures_relancer,
             commands::produits_categories,
             commands::seed_demo_data,
@@ -173,7 +158,93 @@ pub fn run() {
             commands::promos_create,
             commands::promos_toggle,
             commands::promos_valider,
-        ])
+            // Audit + multi-dépôts
+            commands::audit_list,
+            commands::audit_actions,
+            commands::audit_purge,
+            commands::depots_list,
+            commands::depots_create,
+            commands::depot_stock,
+            commands::depots_valeur,
+            commands::depot_transferer,
+            commands::depot_mouvements,
+            // Diagnostics & robustesse
+            diagnostics::incidents_lister,
+            diagnostics::incidents_vider,
+            diagnostics::incidents_exporter,
+            // Mode hors-ligne
+            horsligne::sante_etat,
+            horsligne::hors_ligne_lister,
+            horsligne::hors_ligne_enregistrer,
+            horsligne::hors_ligne_rejouer,
+            // Exports comptables
+            commands::export_ventes_csv,
+            commands::export_tva_csv,
+            commands::export_balance_csv,
+            commands::export_journal_csv,
+    ]);
+
+    tauri::Builder::default()
+        // Le plugin SQL n'est plus chargé : tout le SQL passe par sqlx côté
+        // Rust (db/mod.rs). Le garder exposait `sql:allow-execute` au webview,
+        // c'est-à-dire la possibilité d'exécuter du SQL arbitraire depuis la
+        // fenêtre. On retire donc une surface d'attaque inutile.
+        .plugin(tauri_plugin_store::Builder::default().build())
+        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_os::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_http::init())
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            let _ = app.get_webview_window("main").expect("no main window").set_focus();
+        }))
+        .manage(LoginGuard::default())
+        .setup(|app| {
+            let handle = app.handle().clone();
+            tauri::async_runtime::block_on(async move {
+                match db::init_db(&handle).await {
+                    Ok(pool) => {
+                        handle.manage(pool);
+                    }
+                    Err(e) => {
+                        // Ne pas dieuer en silence : l'app doit le signaler
+                        // clairement à l'utilisateur plutôt que d'ouvrir une
+                        // fenêtre vide qui échoue sur chaque écran.
+                        eprintln!("ERREUR FATALE - base de données inaccessible : {e}");
+                        eprintln!("Emplacement : {}", handle.path().app_data_dir().map(|d| d.join("gestion.db").to_string_lossy().to_string()).unwrap_or_default());
+                        std::process::exit(1);
+                    }
+                }
+            });
+            Ok(())
+        })
+        .invoke_handler(move |invoke: tauri::ipc::Invoke<tauri::Wry>| -> bool {
+            // ---- BARRIÈRE D'AUTORISATION (deny-by-default) ----
+            let cmd = invoke.message.command().to_string();
+            let webview = invoke.message.webview();
+            let app = webview.app_handle().clone();
+            let token = match invoke.message.payload() {
+                tauri::ipc::InvokeBody::Json(v) => v
+                    .get("token")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                _ => String::new(),
+            };
+            if let Err(e) = authz::authorize(&app, &cmd, &token) {
+                diagnostics::securite(&cmd, &e);
+                // IMPORTANT : on renvoie `true`. Le handler renvoie `false`
+                // quand la commande est inconnue, et Tauri tente alors de
+                // rejeter la promesse une seconde fois via son propre
+                // resolver, ce qui provoque un panic « resolver consumed ».
+                invoke.resolver.reject(e);
+                return true;
+            }
+            handler(invoke)
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

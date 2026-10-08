@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Check, Pencil, Plus, Printer, RotateCcw, Search, Tags, Trash2, X } from "lucide-react";
 import { api } from "../services/api";
@@ -47,9 +47,20 @@ export default function Produits() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["produits"] }),
   });
   const del = useMutation({ mutationFn: (id: string) => api.produitsDelete(id), onSuccess: () => qc.invalidateQueries({ queryKey: ["produits"] }) });
+
+  // Premier lancement : on charge automatiquement le catalogue quincaillerie
+  // pour que la caisse soit utilisable immédiatement.
+  const autoSeed = useRef(false);
+  useEffect(() => {
+    if (autoSeed.current || isLoading || isError) return;
+    if ((data?.total ?? 0) === 0) {
+      autoSeed.current = true;
+      importerCatalogue.mutate();
+    }
+  }, [data?.total, isLoading, isError]);
   return (
     <div>
-      <PageHeader title="Articles Quincaillerie" subtitle={`${filtered.length} articles`}
+      <PageHeader title="Quincaillerie" subtitle={`${filtered.length} articles — vente & achat`}
         actions={
           <div className="flex gap-1 flex-wrap">
             <Input placeholder="Rechercher (réf, désignation, code-barres)..." value={q} onChange={(e) => setQ(e.target.value)} className="w-56" />

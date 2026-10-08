@@ -21,9 +21,45 @@ pub async fn produits_get(pool: State<'_, DbPool>, id: String) -> Result<Produit
 
 #[tauri::command]
 pub async fn produits_search(pool: State<'_, DbPool>, q: String) -> Result<Vec<Produit>, String> {
-    let like = format!("%{q}%");
+    let like = format!("%{}%", crate::validation::nettoyer(&q, 80));
     sqlx::query_as("SELECT * FROM produits WHERE designation LIKE ? OR reference LIKE ? LIMIT 50")
         .bind(&like).bind(&like).fetch_all(&*pool).await.map_err(|e| e.to_string())
+}
+
+/// Catalogue de la caisse : recherche et filtre par catégorie appliqués en SQL.
+///
+/// Charger tout le catalogue côté front ne tient pas à l'échelle : une vraie
+/// quincaillerie a plusieurs milliers de références. Le tri place les articles
+/// disponibles en premier — un vendeur doit voir ce qu'il peut vendre.
+#[tauri::command]
+pub async fn produits_caisse(
+    pool: State<'_, DbPool>,
+    q: Option<String>,
+    categorie: Option<String>,
+    limite: Option<i64>,
+) -> Result<Vec<Produit>, String> {
+    let lim = limite.unwrap_or(120).clamp(1, 500);
+    let recherche = crate::validation::nettoyer(&q.unwrap_or_default(), 80).to_lowercase();
+    let cat = crate::validation::nettoyer(&categorie.unwrap_or_default(), 60);
+    let motif = format!("%{recherche}%");
+
+    let mut sql = String::from(
+        "SELECT * FROM produits WHERE actif = 1 AND (stock > 0 OR ? = '') ",
+    );
+    sql.push_str(" AND ( ? = '' OR lower(designation) LIKE ? OR lower(reference) LIKE ? OR lower(COALESCE(code_barre,'')) LIKE ? ) ");
+    sql.push_str(" AND ( ? = '' OR categorie = ? ) ");
+    // Disponible d'abord, puis alphabétique : le vendeur voit ce qu'il vend.
+    sql.push_str("ORDER BY CASE WHEN stock > 0 THEN 0 ELSE 1 END, designation LIMIT ?");
+
+    sqlx::query_as(&sql)
+        .bind(&cat)
+        .bind(&cat)
+        .bind(&motif).bind(&motif).bind(&motif)
+        .bind(&cat).bind(&cat)
+        .bind(lim)
+        .fetch_all(&*pool)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -80,16 +116,51 @@ pub async fn produits_stock_mouvements(pool: State<'_, DbPool>, produit_id: Stri
 }
 
 #[tauri::command]
-pub async fn produits_ajuster_stock(pool: State<'_, DbPool>, produit_id: String, quantite: f64, motif: String) -> Result<Produit, String> {
-    let p: Produit = produits_get(pool.clone(), produit_id.clone()).await?;
-    let apres = p.stock + quantite;
+pub async fn produits_ajuster_stock(
+    pool: State<'_, DbPool>,
+    produit_id: String,
+    quantite: f64,
+    motif: String,
+) -> Result<Produit, String> {
+    if quantite == 0.0 {
+        return Err("Quantité d'ajustement nulle : rien à corriger".to_string());
+    }
+    if !quantite.is_finite() || quantite.abs() > crate::validation::QUANTITE_MAX {
+        return Err("Quantité d'ajustement invalide".to_string());
+    }
+    let motif = crate::validation::nettoyer(&motif, 120);
+    if motif.is_empty() {
+        return Err("Motif obligatoire : un ajustement de stock doit être justifié".to_string());
+    }
+
+    // Transaction : le mouvement et la mise à jour du stock sont indissociables.
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    let p: Option<(f64,)> = sqlx::query_as("SELECT stock FROM produits WHERE id=?")
+        .bind(&produit_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+    let (avant,) = p.ok_or_else(|| format!("Article introuvable : {produit_id}"))?;
+    let apres = avant + quantite;
+
+    // Garde-fou : un ajustement ne doit jamais rendre le stock négatif, sinon
+    // l'inventaire physique et le stock théorique deviennent incompatibles.
+    if apres < -1e-9 {
+        return Err(format!(
+            "Ajustement refusé : le stock passerait en négatif ({avant} → {})",
+            apres
+        ));
+    }
+
     let mid = Uuid::new_v4().to_string();
-    let typ = if quantite >= 0.0 { "entree" } else { "sortie" };
+    let typ = if quantite > 0.0 { "entree" } else { "sortie" };
     sqlx::query("INSERT INTO mouvements_stock (id,produit_id,type,quantite,stock_avant,stock_apres,motif) VALUES (?,?,?,?,?,?,?)")
-        .bind(&mid).bind(&produit_id).bind(typ).bind(quantite).bind(p.stock).bind(apres).bind(&motif)
-        .execute(&*pool).await.map_err(|e| e.to_string())?;
+        .bind(&mid).bind(&produit_id).bind(typ).bind(quantite).bind(avant).bind(apres).bind(&motif)
+        .execute(&mut *tx).await.map_err(|e| e.to_string())?;
     sqlx::query("UPDATE produits SET stock=?,updated_at=CURRENT_TIMESTAMP WHERE id=?")
-        .bind(apres).bind(&produit_id).execute(&*pool).await.map_err(|e| e.to_string())?;
+        .bind(apres).bind(&produit_id).execute(&mut *tx).await.map_err(|e| e.to_string())?;
+    tx.commit().await.map_err(|e| e.to_string())?;
+
     produits_get(pool, produit_id).await
 }
 
@@ -107,22 +178,51 @@ pub async fn stock_mouvements(pool: State<'_, DbPool>, limit: Option<i64>) -> Re
 }
 
 #[tauri::command]
+/// Inventaire physique : aligne le stock théorique sur le compté.
+/// Tout ou rien : si une ligne échoue, aucun stock n'est modifié.
 pub async fn stock_inventaire(pool: State<'_, DbPool>, items: Vec<(String, f64)>) -> Result<bool, String> {
-    for (pid, nouveau) in items {
-        let p: Option<Produit> = sqlx::query_as("SELECT * FROM produits WHERE id=?").bind(&pid)
-            .fetch_optional(&*pool).await.map_err(|e| e.to_string())?;
-        if let Some(p) = p {
-            let diff = nouveau - p.stock;
-            if diff != 0.0 {
-                let mid = Uuid::new_v4().to_string();
-                sqlx::query("INSERT INTO mouvements_stock (id,produit_id,type,quantite,stock_avant,stock_apres,motif) VALUES (?,?,?,?,?,?,?)")
-                    .bind(&mid).bind(&pid).bind("inventaire").bind(diff).bind(p.stock).bind(nouveau).bind("Inventaire")
-                    .execute(&*pool).await.map_err(|e| e.to_string())?;
-                sqlx::query("UPDATE produits SET stock=? WHERE id=?").bind(nouveau).bind(&pid)
-                    .execute(&*pool).await.map_err(|e| e.to_string())?;
-            }
+    if items.is_empty() {
+        return Err("Inventaire vide".to_string());
+    }
+    // Pré-validation de toutes les lignes avant d'écrire quoi que ce soit :
+    // évite de laisser un inventaire à moitié appliqué après une erreur.
+    for (pid, compte) in &items {
+        crate::validation::valider_quantite(*compte, "Quantité comptée")
+            .map_err(|e| format!("Article {pid} : {e}"))?;
+        let row: Option<(f64,)> = sqlx::query_as("SELECT stock FROM produits WHERE id=?")
+            .bind(pid)
+            .fetch_optional(&*pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        if row.is_none() {
+            return Err(format!("Article introuvable : {pid}"));
         }
     }
+
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    let mut ecarts = 0usize;
+    for (pid, compte) in &items {
+        let nouveau = crate::validation::valider_quantite(*compte, "Quantité comptée")?;
+        let p: Option<(f64,)> = sqlx::query_as("SELECT stock FROM produits WHERE id=?")
+            .bind(pid)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+        let Some((avant,)) = p else { continue };
+        let diff = nouveau - avant;
+        if diff.abs() > 1e-9 {
+            ecarts += 1;
+            let mid = Uuid::new_v4().to_string();
+            sqlx::query("INSERT INTO mouvements_stock (id,produit_id,type,quantite,stock_avant,stock_apres,motif) VALUES (?,?,?,?,?,?,?)")
+                .bind(&mid).bind(pid).bind("inventaire").bind(diff).bind(avant).bind(nouveau).bind("Inventaire physique")
+                .execute(&mut *tx).await.map_err(|e| e.to_string())?;
+            sqlx::query("UPDATE produits SET stock=?,updated_at=CURRENT_TIMESTAMP WHERE id=?")
+                .bind(nouveau).bind(pid)
+                .execute(&mut *tx).await.map_err(|e| e.to_string())?;
+        }
+    }
+    tx.commit().await.map_err(|e| e.to_string())?;
+    eprintln!("[STOCK] Inventaire appliqué : {ecarts} écart(s) corrigé(s) sur {} ligne(s)", items.len());
     Ok(true)
 }
 

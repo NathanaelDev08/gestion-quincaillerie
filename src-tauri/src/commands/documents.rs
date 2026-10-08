@@ -127,7 +127,7 @@ pub async fn devis_changer_statut(pool: State<'_, DbPool>, id: String, statut: S
 #[tauri::command]
 pub async fn devis_generer_pdf(app: AppHandle, pool: State<'_, DbPool>, id: String) -> Result<String, String> {
     let (d, lignes) = devis_get(pool, id).await?;
-    let dir = app.path().document_dir().map_err(|e| e.to_string())?.join("GestionCommerciale");
+    let dir = app.path().document_dir().map_err(|e| e.to_string())?.join("GestionQuincaillerie");
     let items: Vec<(String, f64, f64, f64)> = lignes.into_iter().map(|l| (l.designation, l.quantite, l.prix_unitaire_ht, l.total_ht)).collect();
     let html = crate::services::pdf::build_facture_html(
         &serde_json::json!({"company_name":"Ma Société"}),
@@ -277,7 +277,7 @@ pub async fn factures_from_devis(pool: State<'_, DbPool>, app: AppHandle, devis_
 #[tauri::command]
 pub async fn factures_generer_pdf(app: AppHandle, pool: State<'_, DbPool>, id: String) -> Result<String, String> {
     let (f, lignes, _) = factures_get(pool, id).await?;
-    let dir = app.path().document_dir().map_err(|e| e.to_string())?.join("GestionCommerciale");
+    let dir = app.path().document_dir().map_err(|e| e.to_string())?.join("GestionQuincaillerie");
     let items: Vec<(String, f64, f64, f64)> = lignes.into_iter().map(|l| (l.designation, l.quantite, l.prix_unitaire_ht, l.total_ht)).collect();
     let html = crate::services::pdf::build_facture_html(
         &serde_json::json!({"company_name":"Ma Société"}),

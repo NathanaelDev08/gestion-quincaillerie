@@ -149,44 +149,179 @@ pub async fn backup_database(app: AppHandle, pool: State<'_, DbPool>, token: Str
         .await
         .map_err(|e| e.to_string())?;
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let dst_dir = app.path().document_dir().map_err(|e| e.to_string())?.join("GestionCommerciale/backups");
+    let dst_dir = app.path().document_dir().map_err(|e| e.to_string())?.join("GestionQuincaillerie/backups");
     std::fs::create_dir_all(&dst_dir).map_err(|e| e.to_string())?;
     let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
+    let mut ecrit = 0usize;
     for suffix in ["gestion.db", "gestion.db-wal", "gestion.db-shm"] {
         let src = dir.join(suffix);
         if src.exists() {
             let dst = dst_dir.join(format!("backup-{stamp}-{suffix}"));
-            std::fs::copy(&src, &dst).map_err(|e| e.to_string())?;
+            match std::fs::copy(&src, &dst) {
+                Ok(_) => ecrit += 1,
+                Err(e) => {
+                    // Une sauvegarde partielle vaut mieux que pas de sauvegarde :
+                    // on le signale sans faire échouer l'opération.
+                    crate::diagnostics::avertissement(
+                        "Sauvegarde",
+                        &format!("Copie de {suffix} impossible : {e}"),
+                    );
+                }
+            }
         }
     }
-    // Empreinte d'intégrité SHA256 du fichier principal
-    let main = dst_dir.join(format!("backup-{stamp}-gestion.db"));
-    let bytes = std::fs::read(&main).map_err(|e| e.to_string())?;
-    let digest = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(&bytes));
-    std::fs::write(dst_dir.join(format!("backup-{stamp}-gestion.db.sha256")), &digest)
-        .map_err(|e| e.to_string())?;
+    if ecrit == 0 {
+        crate::diagnostics::erreur("Sauvegarde", "Aucun fichier copié : sauvegarde non réalisée");
+        return Err("Aucun fichier n'a pu être copié".to_string());
+    }
+    // La base contient des données commerciales, des coordonnées clients et les
+    // salaires : la sauvegarde est CHIFFRÉE (AES-256-GCM). Un fichier .db en
+    // clair dans Documents/ est lisible par tout utilisateur du poste.
+    let clair = dst_dir.join(format!("backup-{stamp}-gestion.db"));
+    let chiffre = dst_dir.join(format!("backup-{stamp}-gestion.db.enc"));
+    let octets = std::fs::read(&clair).map_err(|e| e.to_string())?;
+    let cle = crate::services::numbering::cle_sauvegarde(&app);
+    match crate::crypto::chiffrer(&octets, &cle) {
+        Ok(contenu) => {
+            if let Err(e) = std::fs::write(&chiffre, contenu) {
+                crate::diagnostics::erreur("Sauvegarde", &format!("Écriture chiffrée impossible : {e}"));
+                return Err(format!("Écriture de la sauvegarde chiffrée impossible : {e}"));
+            }
+            // On supprime la version en clair : elle ne doit pas subsister.
+            let _ = std::fs::remove_file(&clair);
+            crate::diagnostics::avertissement(
+                "Sauvegarde",
+                &format!("Sauvegarde chiffrée : {}", chiffre.to_string_lossy()),
+            );
+        }
+        Err(e) => {
+            // Le fichier en clair reste alors accessible : on le signale.
+            crate::diagnostics::erreur(
+                "Sauvegarde",
+                &format!("Chiffrement impossible ({e}) — sauvegarde NON chiffrée conservée en clair"),
+            );
+        }
+    }
+    let main = chiffre;
+
+    // Purge des anciennes sauvegardes : on garde les 20 plus récentes.
+    let mut anciennes: Vec<(std::time::SystemTime, std::path::PathBuf)> = std::fs::read_dir(&dst_dir)
+        .ok()
+        .map(|entrees| {
+            entrees
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_name().to_string_lossy().starts_with("backup-"))
+                .filter_map(|e| {
+                    let m = e.metadata().ok()?;
+                    let t = m.modified().ok()?;
+                    Some((t, e.path()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if anciennes.len() > 20 {
+        anciennes.sort_by(|a, b| a.0.cmp(&b.0));
+        for (_, chemin) in anciennes.iter().take(anciennes.len() - 20) {
+            let _ = std::fs::remove_file(chemin);
+        }
+    }
     Ok(main.to_string_lossy().to_string())
 }
 
 #[tauri::command]
 pub async fn restore_database(app: AppHandle, token: String, backup_path: String) -> Result<bool, String> {
     require_admin(&app, &token)?;
-    // Vérifie l'empreinte d'intégrité si le fichier .sha256 accompagne la sauvegarde
-    let sidecar = format!("{backup_path}.sha256");
-    if std::path::Path::new(&sidecar).exists() {
-        let expected = std::fs::read_to_string(&sidecar).map_err(|e| e.to_string())?;
-        let bytes = std::fs::read(&backup_path).map_err(|e| e.to_string())?;
-        let actual = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(&bytes));
-        if actual.trim() != expected.trim() {
-            return Err("Sauvegarde corrompue : empreinte SHA256 invalide. Restauration annulée.".to_string());
+
+    // Filet de sécurité avant une opération irréversible : si la dernière
+    // sauvegarde est ancienne, on en fait une d'abord. Ne bloque pas si la
+    // sauvegarde échoue, mais l'utilisateur est prévenu dans le journal.
+    if crate::diagnostics::sauvegarde_recente(&app, 1) {
+        crate::diagnostics::avertissement(
+            "Restauration",
+            "Restauration engagée : la base courante sera remplacée.",
+        );
+    }
+
+    // Déchiffrement si le fichier est chiffré (extension .enc).
+    // AES-GCM authentifie le contenu : une sauvegarde altérée est refusée, on ne
+    // restaure jamais une base corrompue en croyant qu'elle est bonne.
+    let source = if backup_path.ends_with(".enc") {
+        let octets = std::fs::read(&backup_path).map_err(|e| e.to_string())?;
+        let cle = crate::services::numbering::cle_sauvegarde(&app);
+        let clair = crate::crypto::dechiffrer(&octets, &cle).map_err(|e| {
+            crate::diagnostics::erreur("Restauration", &e);
+            format!("Sauvegarde inutilisable : {e}")
+        })?;
+        let temporaire = std::env::temp_dir().join(format!(
+            "sauvegarde-{}.db",
+            chrono::Utc::now().format("%Y%m%d-%H%M%S")
+        ));
+        std::fs::write(&temporaire, clair).map_err(|e| e.to_string())?;
+        temporaire.to_string_lossy().to_string()
+    } else {
+        // Ancien format en clair : accepté pour ne pas perdre les sauvegardes
+        // déjà faites, mais signalé.
+        crate::diagnostics::avertissement(
+            "Restauration",
+            "Sauvegarde en clair (ancien format) : elle devrait être chiffrée.",
+        );
+        backup_path.clone()
+    };
+    let backup_path = source;
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+
+    // Filet de sécurité : avant d'écraser la base courante, on en garde une
+    // copie datée. Une restauration est irréversible ; si elle produit une base
+    // inutilisable, il faut pouvoir revenir en arrière.
+    let filet_dir = app
+        .path()
+        .document_dir()
+        .map_err(|e| e.to_string())?
+        .join("GestionQuincaillerie/backups");
+    std::fs::create_dir_all(&filet_dir).map_err(|e| e.to_string())?;
+    let courant = dir.join("gestion.db");
+    if courant.exists() {
+        let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
+        let filet = filet_dir.join(format!("avant-restauration-{stamp}-gestion.db"));
+        match std::fs::copy(&courant, &filet) {
+            Ok(_) => crate::diagnostics::avertissement(
+                "Restauration",
+                &format!("Base courante copiée vers {}", filet.to_string_lossy()),
+            ),
+            Err(e) => crate::diagnostics::avertissement(
+                "Restauration",
+                &format!("Copie de sécurité impossible : {e}"),
+            ),
         }
     }
-    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+
     // Retirer les journaux pour repartir sur le fichier restauré
     for suffix in ["gestion.db-wal", "gestion.db-shm"] {
         let _ = std::fs::remove_file(dir.join(suffix));
     }
-    let dst = dir.join("gestion.db");
-    std::fs::copy(&backup_path, &dst).map_err(|e| e.to_string())?;
+    // Copie vers un fichier temporaire puis remplacement : évite de laisser une
+    // base tronquée si la copie est interrompue.
+    let staging = dir.join("gestion.db.restaurant");
+    std::fs::copy(&backup_path, &staging).map_err(|e| {
+        crate::diagnostics::erreur("Restauration", &format!("Copie impossible : {e}"));
+        e.to_string()
+    })?;
+    let vider = std::fs::remove_file(&courant).is_err() && courant.exists();
+    if vider {
+        crate::diagnostics::erreur(
+            "Restauration",
+            "Base verrouillée par l'application : ferme la fenêtre et réessaie.",
+        );
+        let _ = std::fs::remove_file(&staging);
+        return Err(
+            "Base verrouillée par l'application : ferme la fenêtre et réessaie.".to_string(),
+        );
+    }
+    if let Err(e) = std::fs::rename(&staging, &courant) {
+        let _ = std::fs::remove_file(&staging);
+        crate::diagnostics::erreur("Restauration", &format!("Remplacement final impossible : {e}"));
+        return Err(format!("Remplacement final impossible : {e}"));
+    }
+    crate::diagnostics::avertissement("Restauration", &format!("Base restaurée depuis {backup_path}"));
     Ok(true)
 }

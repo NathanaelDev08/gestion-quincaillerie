@@ -1,5 +1,8 @@
 use crate::error::AppResult;
-use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
+use sqlx::{
+    sqlite::{SqliteConnection, SqlitePoolOptions},
+    Pool, Sqlite, Transaction,
+};
 use tauri::{AppHandle, Manager};
 
 pub type DbPool = Pool<Sqlite>;
@@ -30,14 +33,14 @@ pub async fn init_db(app: &AppHandle) -> AppResult<DbPool> {
     Ok(pool)
 }
 
-/// Copie la base vers Documents/GestionCommerciale/backups une fois par jour.
+/// Copie la base vers Documents/GestionQuincaillerie/backups une fois par jour.
 async fn auto_backup(app: &AppHandle, pool: &DbPool) -> Result<(), String> {
     let today = chrono::Utc::now().format("%Y%m%d").to_string();
     let dst_dir = app
         .path()
         .document_dir()
         .map_err(|e| e.to_string())?
-        .join("GestionCommerciale/backups");
+        .join("GestionQuincaillerie/backups");
     std::fs::create_dir_all(&dst_dir).map_err(|e| e.to_string())?;
     let already: bool = std::fs::read_dir(&dst_dir)
         .map_err(|e| e.to_string())?
@@ -75,7 +78,28 @@ async fn auto_backup(app: &AppHandle, pool: &DbPool) -> Result<(), String> {
     Ok(())
 }
 
-pub async fn run_migrations(pool: &DbPool) -> AppResult<()> {
+/// Sessions rafraîchissables (jetons révocables) — migration v7, idempotente.
+async fn run_migrations_v7(pool: &DbPool) -> AppResult<()> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS sessions_refresh (
+            token TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL REFERENCES users(id),
+            expire_at TEXT NOT NULL,
+            cree_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions_refresh(user_id)")
+        .execute(pool)
+        .await?;
+    let _ = sqlx::query("DELETE FROM sessions_refresh WHERE expire_at < datetime('now')")
+        .execute(pool)
+        .await;
+    Ok(())
+}
+
+async fn run_migrations(pool: &DbPool) -> AppResult<()> {
     let schema: &str = r#"
         PRAGMA journal_mode=WAL;
         PRAGMA foreign_keys=ON;
@@ -299,25 +323,24 @@ pub async fn run_migrations(pool: &DbPool) -> AppResult<()> {
     .execute(pool)
     .await?;
 
-    // Compte de test par défaut (créé uniquement si aucun utilisateur n'existe)
+    // Premier compte : AUCUN compte n'est créé automatiquement.
+    //
+    // Deux pièges évités :
+    // 1. un mot de passe admin connu par défaut (admin/admin123) donne le
+    //    contrôle du poste à quiconque a la main dessus ;
+    // 2. un mot de passe généré affiché dans l'application est inaccessible
+    //    sans déjà être connecté — l'utilisateur se retrouve bloqué.
+    //
+    // L'application affiche donc un écran de première installation où
+    // l'utilisateur choisit lui-même son identifiant et son mot de passe.
     let (user_count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users")
         .fetch_one(pool)
         .await?;
     if user_count == 0 {
-        let id = uuid::Uuid::new_v4().to_string();
-        let hash = crate::auth::hash_password("admin123")?;
-        sqlx::query(
-            "INSERT INTO users (id, username, password_hash, full_name, email, role) VALUES (?,?,?,?,?,?)",
-        )
-        .bind(&id)
-        .bind("admin")
-        .bind(&hash)
-        .bind("Administrateur")
-        .bind("admin@demo.local")
-        .bind("admin")
-        .execute(pool)
-        .await?;
-        eprintln!("[DB] Compte test 'admin' créé");
+        crate::diagnostics::avertissement(
+            "Premier démarrage",
+            "Aucun compte existant : l'application demande de créer le compte administrateur.",
+        );
     }
     let users: Vec<(String, String)> =
         sqlx::query_as("SELECT username, role FROM users")
@@ -471,6 +494,8 @@ async fn run_migrations_v3(pool: &DbPool) -> AppResult<()> {
     }
     run_migrations_v4(pool).await?;
     run_migrations_v5(pool).await?;
+    run_migrations_v6(pool).await?;
+    run_migrations_v7(pool).await?;
     Ok(())
 }
 
@@ -542,6 +567,7 @@ async fn run_migrations_v5(pool: &DbPool) -> AppResult<()> {
     )
     .execute(pool)
     .await?;
+    run_migrations_v6(pool).await?;
     Ok(())
 }
 
@@ -579,13 +605,156 @@ async fn run_migrations_v4(pool: &DbPool) -> AppResult<()> {
     Ok(())
 }
 
-pub async fn next_numero(pool: &DbPool, prefix: &str) -> Result<String, sqlx::Error> {
+/// Migration v6 : journal d'audit + multi-dépôts (idempotente ettolérante)
+async fn run_migrations_v6(pool: &DbPool) -> AppResult<()> {
+    // --- audit_log ---
+    // ATTENTION : une installation existante peut déjà posséder une table
+    // `audit_log` avec un schéma différent (ancienne version). `CREATE TABLE
+    // IF NOT EXISTS` ne modifierait rien et les INSERT échoueraient ensuite.
+    // On aligne donc les colonnes une par une, en tolérant leur absence.
+    let existe: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='audit_log'")
+            .fetch_one(pool)
+            .await?;
+    if existe.0 == 0 {
+        sqlx::query(
+            "CREATE TABLE audit_log (
+                id TEXT PRIMARY KEY,
+                utilisateur TEXT,
+                role TEXT,
+                action TEXT NOT NULL,
+                entite TEXT,
+                entite_id TEXT,
+                detail TEXT,
+                montant REAL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )",
+        )
+        .execute(pool)
+        .await?;
+    } else {
+        let colonnes: Vec<(String,)> =
+            sqlx::query_as("SELECT name FROM pragma_table_info('audit_log')")
+                .fetch_all(pool)
+                .await?;
+        let a: Vec<String> = colonnes.into_iter().map(|c| c.0).collect();
+        // Colonnesrequired côté code d'audit ; ajoutées si absentes.
+        for (nom, ddl) in [
+            ("utilisateur", "ALTER TABLE audit_log ADD COLUMN utilisateur TEXT"),
+            ("role", "ALTER TABLE audit_log ADD COLUMN role TEXT"),
+            ("entite", "ALTER TABLE audit_log ADD COLUMN entite TEXT"),
+            ("entite_id", "ALTER TABLE audit_log ADD COLUMN entite_id TEXT"),
+            ("detail", "ALTER TABLE audit_log ADD COLUMN detail TEXT"),
+            ("montant", "ALTER TABLE audit_log ADD COLUMN montant REAL"),
+            (
+                "created_at",
+                "ALTER TABLE audit_log ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP",
+            ),
+        ] {
+            if !a.iter().any(|c| c == nom) {
+                // Un échec ici ne doit pas bloquer le démarrage de l'app.
+                let _ = sqlx::query(ddl).execute(pool).await;
+            }
+        }
+    }
+    for idx in [
+        "CREATE INDEX IF NOT EXISTS idx_audit_date ON audit_log(created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_log(utilisateur)",
+        "CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(action)",
+    ] {
+        let _ = sqlx::query(idx).execute(pool).await;
+    }
+
+    const V6: &str = r#"
+        CREATE TABLE IF NOT EXISTS depots (
+            id TEXT PRIMARY KEY,
+            nom TEXT UNIQUE NOT NULL,
+            adresse TEXT,
+            actif INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE TABLE IF NOT EXISTS stock_depot (
+            depot_id TEXT NOT NULL,
+            produit_id TEXT NOT NULL,
+            quantite REAL NOT NULL DEFAULT 0,
+            PRIMARY KEY (depot_id, produit_id)
+        );
+        CREATE TABLE IF NOT EXISTS mouvements_depot (
+            id TEXT PRIMARY KEY,
+            depot_id TEXT NOT NULL,
+            produit_id TEXT NOT NULL,
+            type TEXT NOT NULL,
+            quantite REAL NOT NULL,
+            stock_avant REAL NOT NULL,
+            stock_apres REAL NOT NULL,
+            motif TEXT,
+            document_ref TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_mvtdepot ON mouvements_depot(depot_id);
+        CREATE INDEX IF NOT EXISTS idx_stockdepot ON stock_depot(produit_id);
+        "#;
+    for stmt in V6.split(';') {
+        let stmt = stmt.trim();
+        if stmt.is_empty() {
+            continue;
+        }
+        sqlx::query(stmt).execute(pool).await?;
+    }
+    // Dépôt principal par défaut (le stock existant reste sur le dépôt principal)
+    let depot_id = "depot-principal";
+    sqlx::query("INSERT OR IGNORE INTO depots (id, nom, adresse, actif) VALUES (?,?,?,1)")
+        .bind(depot_id)
+        .bind("Dépôt principal")
+        .bind("")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "INSERT OR IGNORE INTO stock_depot (depot_id, produit_id, quantite)
+         SELECT ?, id, stock FROM produits",
+    )
+    .bind(depot_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Journalise une action dans `audit_log` (silencieux : ne bloque jamais l'opération métier).
+pub async fn audit(
+    pool: &DbPool,
+    token: &str,
+    app: &tauri::AppHandle,
+    action: &str,
+    entite: &str,
+    entite_id: &str,
+    detail: &str,
+    montant: Option<f64>,
+) {
+    let (user, role) = match crate::auth::verify_token(token, &crate::authz::jwt_secret(app)) {
+        Ok(c) => (c.username, c.role),
+        Err(_) => ("inconnu".to_string(), "?".to_string()),
+    };
+    let _ = sqlx::query(
+        "INSERT INTO audit_log (id,utilisateur,role,action,entite,entite_id,detail,montant) VALUES (?,?,?,?,?,?,?,?)",
+    )
+    .bind(uuid::Uuid::new_v4().to_string())
+    .bind(&user)
+    .bind(&role)
+    .bind(action)
+    .bind(entite)
+    .bind(entite_id)
+    .bind(detail)
+    .bind(montant)
+    .execute(pool)
+    .await;
+}
+
+async fn next_numero_conn(conn: &mut SqliteConnection, prefix: &str) -> Result<String, sqlx::Error> {
     let annee = chrono::Utc::now().format("%Y").to_string();
     let code = format!("{prefix}-{annee}");
     let row: Option<(i64,)> =
         sqlx::query_as("SELECT compteur FROM sequences WHERE code = ?")
             .bind(&code)
-            .fetch_optional(pool)
+            .fetch_optional(&mut *conn)
             .await?;
     let next = row.map(|r| r.0 + 1).unwrap_or(1);
     sqlx::query(
@@ -594,7 +763,199 @@ pub async fn next_numero(pool: &DbPool, prefix: &str) -> Result<String, sqlx::Er
     .bind(&code)
     .bind(&annee)
     .bind(next)
-    .execute(pool)
+    .execute(&mut *conn)
     .await?;
     Ok(format!("{}-{}-{:04}", prefix, annee, next))
+}
+
+/// Numéro séquentiel (pool). Utilisé hors transaction.
+pub async fn next_numero(pool: &DbPool, prefix: &str) -> Result<String, sqlx::Error> {
+    let mut conn = pool.acquire().await?;
+    next_numero_conn(&mut conn, prefix).await
+}
+
+/// Numéro séquentiel à l'intérieur d'une transaction : si la transaction est
+/// annulée, le compteur n'est pas consommé (pas de trou dans la numérotation).
+pub async fn next_numero_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    prefix: &str,
+) -> Result<String, sqlx::Error> {
+    next_numero_conn(&mut **tx, prefix).await
+}
+
+#[cfg(test)]
+mod tests_migration {
+    /// Régression : une installation existante peut déjà avoir une table
+    /// `audit_log` à l'ancien schéma. `CREATE TABLE IF NOT EXISTS` ne corrige
+    /// rien et l'INSERT d'audit échoue ensuite sur « no such column ».
+    /// Ce test fige le comportement attendu de la migration v6.
+    #[tokio::test]
+    async fn v6_aligne_une_ancienne_table_audit_sans_perdre_les_donnees() {
+        use sqlx::Row;
+
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("base mémoire");
+
+        // Ancien schéma, comme sur la base d'un utilisateur déjà installé.
+        sqlx::query(
+            "CREATE TABLE audit_log (
+                id TEXT PRIMARY KEY, user_id TEXT, action TEXT NOT NULL,
+                entity TEXT, entity_id TEXT, details TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO audit_log (id,user_id,action,entity,entity_id,details)
+             VALUES ('a1','u1','vente','facture','F-1','avant')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // La migration copie aussi le stock vers le dépôt principal :
+        // la table produits doit donc exister.
+        sqlx::query("CREATE TABLE produits (id TEXT PRIMARY KEY, stock REAL)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Rejoue la portion audit de la migration.
+        super::run_migrations_v6(&pool).await.expect("migration v6");
+
+        let colonnes: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info('audit_log')")
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.get::<String, _>(0))
+            .collect();
+        for c in ["utilisateur", "role", "entite", "entite_id", "detail", "montant", "created_at"] {
+            assert!(colonnes.iter().any(|x| x == c), "colonne manquante après migration : {c}");
+        }
+
+        // L'écriture d'audit doit de nouveau fonctionner (c'était le bug).
+        sqlx::query(
+            "INSERT INTO audit_log (id,utilisateur,role,action,entite,entite_id,detail,montant)
+             VALUES ('a2','caissier','commercial','vente','facture','F-2','apres',1500.0)",
+        )
+        .execute(&pool)
+        .await
+        .expect("insertion d'audit après migration");
+
+        // Aucune perte de données historiques.
+        let n: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM audit_log")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n.0, 2, "les lignes existantes doivent être préservées");
+    }
+
+    /// Une base vierge doit obtenir le schéma complet, dépôt principal compris.
+    #[tokio::test]
+    async fn v6_cree_le_schema_complet_et_le_depot_principal() {
+        use sqlx::Row;
+
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("base mémoire");
+        // Table produits minimale : la migration y copie le stock initial.
+        sqlx::query("CREATE TABLE produits (id TEXT PRIMARY KEY, stock REAL)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO produits (id,stock) VALUES ('p1',42.0)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        super::run_migrations_v6(&pool).await.expect("migration v6");
+
+        // Idempotence : un second passage ne doit rien casser.
+        super::run_migrations_v6(&pool).await.expect("migration v6 rejouée");
+
+        let depots: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM depots")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(depots.0, 1, "le dépôt principal doit être créé");
+
+        let stock: Vec<(String, String, f64)> =
+            sqlx::query_as("SELECT depot_id, produit_id, quantite FROM stock_depot")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stock.len(), 1, "le stock existant doit être repris dans le dépôt");
+        assert_eq!(stock[0].2, 42.0, "le stock initial doit être conservé");
+        assert_eq!(stock[0].0, "depot-principal");
+
+        // Pas de doublon après le second passage.
+        let lignes: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM stock_depot")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(lignes.0, 1);
+
+        let _unused: Vec<String> = sqlx::query("SELECT name FROM sqlite_master")
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.get::<String, _>(0))
+            .collect();
+    }
+}
+
+#[cfg(test)]
+mod tests_numero {
+    use super::*;
+
+    async fn base_test() -> DbPool {
+        let db = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("base mémoire");
+        sqlx::query("CREATE TABLE sequences (code TEXT PRIMARY KEY, annee TEXT, compteur INTEGER)")
+            .execute(&db)
+            .await
+            .expect("table");
+        db
+    }
+
+    #[tokio::test]
+    async fn numero_sincremente_chaque_appel() {
+        let db = base_test().await;
+        let annee = chrono::Utc::now().format("%Y").to_string();
+
+        let n1 = next_numero(&db, "FAC").await.unwrap();
+        let n2 = next_numero(&db, "FAC").await.unwrap();
+        let n3 = next_numero(&db, "DEV").await.unwrap();
+
+        assert_eq!(n1, format!("FAC-{annee}-0001"));
+        assert_eq!(n2, format!("FAC-{annee}-0002"));
+        assert_eq!(n3, format!("DEV-{annee}-0001"));
+    }
+
+    /// Un rollback ne doit pas brûler de numéro : garantie d'une numérotation
+    /// continue, exigée par les fiscalités de facturation.
+    #[tokio::test]
+    async fn rollback_ne_consomme_pas_de_numero() {
+        let db = base_test().await;
+        let annee = chrono::Utc::now().format("%Y").to_string();
+
+        let mut tx = db.begin().await.unwrap();
+        let _brouille = next_numero_tx(&mut tx, "FAC").await.unwrap();
+        tx.rollback().await.unwrap();
+
+        let apres = next_numero(&db, "FAC").await.unwrap();
+        assert_eq!(apres, format!("FAC-{annee}-0001"), "le numéro 1 doit être réutilisé");
+    }
 }
