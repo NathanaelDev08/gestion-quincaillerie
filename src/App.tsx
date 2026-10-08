@@ -29,7 +29,7 @@ const Comptabilite = lazy(() => import("./pages/Comptabilite"));
 const Parametres = lazy(() => import("./pages/Parametres"));
 import Login, { Register } from "./pages/Login";
 import { useAuth } from "./stores/useAuth";
-import { isTauriRuntime } from "./services/api";
+import { isTauriRuntime, api } from "./services/api";
 import { canAccess } from "./auth/permissions";
 import { Toaster, toast } from "./components/ui";
 import { loadPrefs } from "./stores/prefs";
@@ -65,9 +65,7 @@ function planifierRenouvellement() {
     try {
       const refresh = localStorage.getItem("refresh");
       if (!refresh) return; // plus de session à renouveler
-      const r = await import("./services/api").then((m) =>
-        m.api.refreshToken(refresh),
-      );
+      const r = await api.refreshToken(refresh);
       localStorage.setItem("token", r.token);
       if (r.refresh) localStorage.setItem("refresh", r.refresh);
       if (r.user) localStorage.setItem("user", JSON.stringify(r.user));
