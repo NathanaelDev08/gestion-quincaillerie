@@ -21,11 +21,34 @@ body { @apply bg-slate-100 text-slate-900; }
 /* Focus clavier visible (accessibilité) */
 *:focus-visible { outline: 2px solid #1d4ed8; outline-offset: 1px; }
 
+/* ==========================================================================
+   IMPRESSION
+   Les navigateurs n'impriment PAS les arrière-plans par défaut. Or nos
+   documents utilisent des fonds colorés (en-tête de tableau bleu, texte
+   blanc) : sans cette instruction, la facture s'imprime avec du texte
+   BLANC sur fond BLANC — donc invisible. `print-color-adjust: exact`
+   impose l'impression des couleurs d'arrière-plan.
+   ========================================================================== */
 @media print {
   aside, header { display: none !important; }
   main { padding: 0 !important; }
   button { display: none !important; }
   body * { visibility: hidden; }
   #print-area, #print-area * { visibility: visible; }
-  #print-area { position: absolute; inset: 0; }
+
+  #print-area {
+    position: absolute;
+    inset: 0;
+    /* Force l'impression des fonds : indispensable pour la lisibilité. */
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  /* Évite qu'un tableau long soit coupé net entre deux pages. */
+  #print-area table { page-break-inside: auto; }
+  #print-area tr { page-break-inside: avoid; page-break-after: auto; }
+  #print-area thead { display: table-header-group; }
+
+  /* Lien de rupture pour les factures longues. */
+  #print-area .rupture-page { page-break-before: always; }
 }

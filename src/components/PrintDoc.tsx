@@ -3,6 +3,14 @@ import { QRCodeSVG } from "qrcode.react";
 import { Printer } from "lucide-react";
 import { api } from "../services/api";
 import { fmtMoney, fmtDate } from "../utils/format";
+import { calculerTotaux, type LigneCalcul } from "../utils/caisse";
+
+/** Taux de TVA des lignes du ticket (normalement unique et uniforme). */
+function fmtTaux(lignes: any[]): string {
+  const t = new Set(lignes.map((l) => Number(l?.taux_tva) || 0));
+  if (t.size !== 1) return "";
+  return [...t][0].toString().replace(".0", "");
+}
 import { Button, Modal } from "./ui";
 
 export function useCompany() {
@@ -268,12 +276,31 @@ export function BulletinDoc({ bulletin }: { bulletin: any }) {
   );
 }
 
-export function TicketCaisseDoc({ numero, lignes, total, recu, rendu, mode, clientNom, caissier, dateTime }: {
+/**
+ * Totaux d'un ticket de caisse.
+ *
+ * Doivent venir de la MÊME logique que la caisse et le backend, remise
+ * comprise. Sans cela, un ticket avec code promo affichait un « Total HT »
+ * qui ne correspondait pas au « TOTAL TTC » : le document ne s'additionnait
+ * pas, ce que le client comme le contrôleur remarquent immédiatement.
+ */
+export function totauxTicket(
+  lignes: Pick<LigneCalcul, "quantite" | "prix_unitaire_ht" | "taux_tva" | "remise">[],
+  remiseGlobalePct = 0,
+) {
+  const t = calculerTotaux(
+    lignes.map((l) => ({ ...l, designation: "", produit_id: null })),
+    remiseGlobalePct,
+  );
+  return { ht: t.ht, tva: t.tva, ttc: t.ttc };
+}
+
+export function TicketCaisseDoc({ numero, lignes, total, recu, rendu, mode, clientNom, caissier, dateTime, remiseGlobalePct = 0 }: {
   numero: string; lignes: any[]; total: number; recu: number; rendu: number; mode: string; clientNom?: string;
-  caissier?: string; dateTime?: string;
+  caissier?: string; dateTime?: string; remiseGlobalePct?: number;
 }) {
   const c: any = useCompany();
-  const ht = lignes.reduce((s: number, l: any) => s + l.quantite * l.prix_unitaire_ht, 0);
+  const { ht, tva } = totauxTicket(lignes, remiseGlobalePct);
   const qrValue = `GC:${numero}|${Math.round(total)}|${new Date().toISOString().slice(0, 10)}`;
   return (
     <div className="bg-white text-slate-900 mx-auto" style={{ maxWidth: 300, fontFamily: "Arial, Helvetica, sans-serif" }}>
@@ -307,10 +334,12 @@ export function TicketCaisseDoc({ numero, lignes, total, recu, rendu, mode, clie
         <tbody>
           {lignes.map((l, i) => (
             <tr key={i}>
-              <td className="pr-1">{l.designation.slice(0, 22)}</td>
+              <td className="pr-1">{String(l.designation ?? "").slice(0, 22)}</td>
               <td className="text-right whitespace-nowrap">{l.quantite}</td>
               <td className="text-right whitespace-nowrap">{fmtMoney(l.prix_unitaire_ht)}</td>
-              <td className="text-right whitespace-nowrap font-medium">{fmtMoney(l.quantite * l.prix_unitaire_ht)}</td>
+              <td className="text-right whitespace-nowrap font-medium">
+                {fmtMoney(l.quantite * l.prix_unitaire_ht * (1 - (l.remise ?? 0) / 100) * (1 - remiseGlobalePct / 100))}
+              </td>
             </tr>
           ))}
         </tbody>
@@ -319,7 +348,7 @@ export function TicketCaisseDoc({ numero, lignes, total, recu, rendu, mode, clie
       {/* Totaux */}
       <div className="text-[11px] space-y-0.5">
         <div className="flex justify-between"><span>Total HT</span><span>{fmtMoney(ht)}</span></div>
-        <div className="flex justify-between"><span>TVA incluse</span><span>{fmtMoney(total - ht)}</span></div>
+        <div className="flex justify-between"><span>TVA ({fmtTaux(lignes)} %)</span><span>{fmtMoney(tva)}</span></div>
         <div className="flex justify-between font-bold text-sm border-y border-slate-800 py-0.5"><span>TOTAL TTC</span><span>{fmtMoney(total)}</span></div>
         <div className="flex justify-between mt-1"><span>Reçu ({mode})</span><span>{fmtMoney(recu)}</span></div>
         <div className="flex justify-between font-bold"><span>RENDU</span><span>{fmtMoney(rendu)}</span></div>

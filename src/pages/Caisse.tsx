@@ -182,7 +182,7 @@ export default function Caisse() {
       const cli = (clients?.data || []).find((c) => c.id === clientId);
       const now = new Date();
       const dateTime = now.toLocaleDateString("fr-FR") + " " + now.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
-      setTicket({ ...r, lignes: cart, modeLabel: labelOf(MODES_REGLEMENT, mode), clientNom: cli ? cli.nom : "Client comptoir", caissier: user?.full_name || user?.username, dateTime, horsLigne: false });
+      setTicket({ ...r, lignes: cart, modeLabel: labelOf(MODES_REGLEMENT, mode), clientNom: cli ? cli.nom : "Client comptoir", caissier: user?.full_name || user?.username, dateTime, horsLigne: false, remiseGlobalePct: promoPct });
       resetTicket();
       toast.success(`Vente ${r.numero} encaissée — rendu ${fmtMoney(r.rendu)}`);
       qc.invalidateQueries({ queryKey: ["produits-all"] });
@@ -221,6 +221,7 @@ export default function Caisse() {
             clientNom: cli ? cli.nom : "Client comptoir",
             caissier: user?.full_name || user?.username,
             dateTime: now.toLocaleDateString("fr-FR") + " " + now.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" }),
+            remiseGlobalePct: promoPct,
             horsLigne: true,
           });
           resetTicket();
@@ -476,6 +477,7 @@ export default function Caisse() {
             </p>
           )}
           <TicketCaisseDoc numero={ticket.numero} lignes={ticket.lignes} total={ticket.total_ttc}
+            remiseGlobalePct={ticket.remiseGlobalePct ?? 0}
             recu={ticket.montant_recu} rendu={ticket.rendu} mode={ticket.modeLabel} clientNom={ticket.clientNom}
             caissier={ticket.caissier} dateTime={ticket.dateTime} />
           <div className="flex gap-2 mt-2">
